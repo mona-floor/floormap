@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "id": "20260713-0159-hsspt",
+  "publishAt": "2026-07-12T16:59:00.000Z",
+  "files": [
+    {
+      "storedName": "20260713-0159-hsspt--index.html",
+      "targetPath": "index.html"
+    },
+    {
+      "storedName": "20260713-0159-hsspt--version.json",
+      "targetPath": "version.json"
+    }
+  ],
+  "memo": ""
+}
