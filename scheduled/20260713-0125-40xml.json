@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "id": "20260713-0125-40xml",
+  "publishAt": "2026-07-12T16:25:00.000Z",
+  "files": [
+    {
+      "storedName": "20260713-0125-40xml--index.html",
+      "targetPath": "index.html"
+    },
+    {
+      "storedName": "20260713-0125-40xml--version.json",
+      "targetPath": "version.json"
+    }
+  ],
+  "memo": ""
+}
