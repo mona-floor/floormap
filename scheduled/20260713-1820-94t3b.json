@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "id": "20260713-1820-94t3b",
+  "publishAt": "2026-07-13T09:20:00.000Z",
+  "files": [
+    {
+      "storedName": "20260713-1820-94t3b--index.html",
+      "targetPath": "index.html"
+    },
+    {
+      "storedName": "20260713-1820-94t3b--version.json",
+      "targetPath": "version.json"
+    }
+  ],
+  "memo": ""
+}
