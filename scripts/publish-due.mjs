@@ -1,51 +1,86 @@
-import fs from 'node:fs';
-import path from 'node:path';
+// フロアマップ 予約公開チェックスクリプト
+// scheduled/ 配下のジョブ票(JSON)を確認し、公開時刻(JST)を過ぎていれば
+// 対象パスへ配置します。壊れたジョブは failed/ へ退避し、他のジョブの処理は継続します。
+import fs from 'fs';
+import path from 'path';
 
-const root=process.cwd(), dir=path.join(root,'scheduled'), done=path.join(root,'published'), failed=path.join(root,'failed');
-if(!fs.existsSync(dir)) process.exit(0);
-fs.mkdirSync(done,{recursive:true});
+const SCHED_DIR = 'scheduled';
+const FAILED_DIR = 'failed';
 
-// 予約票のみ対象。データファイル(例: 20260801-0900-ab1cd--version.json)は「--」を含むため除外する
-const jobNames=fs.readdirSync(dir).filter(n=>n.endsWith('.json')&&!n.includes('--')).sort();
-let hadFailure=false;
-
-for(const name of jobNames){
-  const jsonPath=path.join(dir,name);
-  try{
-    const job=JSON.parse(fs.readFileSync(jsonPath,'utf8'));
-    const publishTime=Date.parse(job.publishAt);
-    if(!Number.isFinite(publishTime)) throw new Error(`Invalid publishAt: ${job.publishAt}`);
-    if(publishTime>Date.now()) continue;
-    const files=Array.isArray(job.files)?job.files.map(f=>({storedName:f.storedName,targetPath:f.targetPath})):[{storedName:job.mapFile,targetPath:job.targetPath}];
-    for(const file of files){
-      if(typeof file.storedName!=='string'||!/^[\w.-]+(--[\w.-]+)?$/.test(file.storedName)||file.storedName.includes('..')) throw new Error(`Invalid storedName: ${file.storedName}`);
-      if(typeof file.targetPath!=='string') throw new Error(`Missing targetPath`);
-      const target=path.resolve(root,file.targetPath);
-      const rel=path.relative(root,target);
-      if(rel.startsWith('..')||path.isAbsolute(rel)) throw new Error(`Invalid targetPath: ${file.targetPath}`);
-      // 自分自身の仕組みを上書きさせない
-      const top=rel.split(path.sep)[0];
-      if(['scheduled','published','failed','.github','scripts'].includes(top)) throw new Error(`Protected targetPath: ${file.targetPath}`);
-      if(!fs.existsSync(path.join(dir,file.storedName))) throw new Error(`Scheduled file not found: ${file.storedName}`);
-    }
-    // 全ファイルの検証を通過してからコピー(途中失敗による中途半端な公開を防ぐ)
-    for(const file of files){
-      const target=path.resolve(root,file.targetPath);
-      fs.mkdirSync(path.dirname(target),{recursive:true});
-      fs.copyFileSync(path.join(dir,file.storedName),target);
-    }
-    for(const file of files) fs.renameSync(path.join(dir,file.storedName),path.join(done,file.storedName));
-    fs.renameSync(jsonPath,path.join(done,name));
-    console.log(`Published ${files.map(f=>f.targetPath).join(', ')}`);
-  }catch(err){
-    // 不正な予約票1件で全体を止めない。failed/ へ退避して次のジョブへ進む
-    hadFailure=true;
-    console.error(`[SKIP] ${name}: ${err.message}`);
-    try{
-      fs.mkdirSync(failed,{recursive:true});
-      fs.renameSync(jsonPath,path.join(failed,name));
-      fs.writeFileSync(path.join(failed,name+'.error.txt'),`${new Date().toISOString()}\n${err.message}\n`);
-    }catch(moveErr){console.error(`[WARN] could not quarantine ${name}: ${moveErr.message}`)}
-  }
+function listJobManifests(dir) {
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir)
+    .filter((name) => name.endsWith('.json') && !name.includes('--'))
+    .map((name) => path.join(dir, name));
 }
-if(hadFailure) process.exitCode=0; // 退避済みなのでワークフロー自体は成功扱い(コミットで failed/ が残る)
+
+function quarantine(manifestPath, job, reason) {
+  fs.mkdirSync(FAILED_DIR, { recursive: true });
+  const base = path.basename(manifestPath, '.json');
+  const failedManifest = path.join(FAILED_DIR, base + '.json');
+  if (fs.existsSync(manifestPath)) fs.renameSync(manifestPath, failedManifest);
+  if (job && Array.isArray(job.files)) {
+    for (const f of job.files) {
+      if (!f || !f.storedName) continue;
+      const src = path.join(SCHED_DIR, f.storedName);
+      if (fs.existsSync(src)) fs.renameSync(src, path.join(FAILED_DIR, f.storedName));
+    }
+  }
+  fs.writeFileSync(path.join(FAILED_DIR, base + '.error.txt'), String(reason), 'utf-8');
+}
+
+function safeTargetPath(targetPath) {
+  const norm = path.normalize(targetPath).replace(/^([/\\])+/, '');
+  if (norm.split(/[/\\]/).includes('..') || path.isAbsolute(norm)) {
+    throw new Error('不正なtargetPathです: ' + targetPath);
+  }
+  return norm;
+}
+
+function main() {
+  const manifests = listJobManifests(SCHED_DIR);
+  const now = Date.now();
+  let published = 0, failed = 0, skipped = 0;
+
+  for (const manifestPath of manifests) {
+    let job = null;
+    try {
+      job = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    } catch (e) {
+      quarantine(manifestPath, null, 'ジョブ票のJSON解析エラー: ' + e.message);
+      failed++;
+      continue;
+    }
+    try {
+      if (!job.publishAt) throw new Error('publishAtがありません');
+      const t = new Date(job.publishAt).getTime();
+      if (Number.isNaN(t)) throw new Error('publishAtの日付形式が不正です: ' + job.publishAt);
+      if (t > now) { skipped++; continue; }
+      if (!Array.isArray(job.files) || job.files.length === 0) throw new Error('filesが空です');
+
+      for (const f of job.files) {
+        if (!f || !f.storedName || !f.targetPath) throw new Error('files定義が不正です');
+        const safeTarget = safeTargetPath(f.targetPath);
+        const src = path.join(SCHED_DIR, f.storedName);
+        if (!fs.existsSync(src)) throw new Error('データファイルが見つかりません: ' + f.storedName);
+        const dir = path.dirname(safeTarget);
+        if (dir && dir !== '.') fs.mkdirSync(dir, { recursive: true });
+        fs.copyFileSync(src, safeTarget);
+      }
+      for (const f of job.files) {
+        const src = path.join(SCHED_DIR, f.storedName);
+        if (fs.existsSync(src)) fs.unlinkSync(src);
+      }
+      fs.unlinkSync(manifestPath);
+      published++;
+      console.log('公開完了:', job.id || path.basename(manifestPath));
+    } catch (e) {
+      quarantine(manifestPath, job, e.message || String(e));
+      failed++;
+      console.error('失敗:', manifestPath, '-', e.message || e);
+    }
+  }
+  console.log(`結果: 公開${published}件 / 保留${skipped}件 / 失敗${failed}件`);
+}
+
+main();
